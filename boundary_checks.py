@@ -47,17 +47,24 @@ def structure():
 
 class Guard:
     """Only the published storage protocol; a runner cannot obtain a connection."""
-    __slots__ = ("backend","allowed","reads","writing")
+    __slots__ = ("backend","allowed","reads","writing","frames")
     def __init__(self,backend):
         self.backend,self.allowed,self.reads,self.writing = backend,set(),[],False
+        self.frames = []
     @contextmanager
     def transaction(self,write=True):
         previous = self.writing
-        self.writing = write or previous
+        # Remember each frame's own mode.  A nested read-only frame (used by
+        # the read snapshot inside a caller's write transaction) must not look
+        # like an applying frame, while a write frame keeps export forbidden
+        # for the whole nesting beneath it.
+        self.frames.append(write)
+        self.writing = bool(write) or bool(previous)
         try:
             with self.backend.transaction(write):
                 yield
         finally:
+            self.frames.pop()
             self.writing = previous
     def generation(self):
         return self.backend.generation()
@@ -77,7 +84,10 @@ class Guard:
     def delete(self,table,ids):
         return self.backend.delete(table,ids)
     def export(self):
-        assert not self.writing,"export is forbidden while applying"
+        # Forbidden only from an applying (writable) frame; a read-only
+        # snapshot frame, even nested in a caller's write transaction, is the
+        # legitimate read path and may export.
+        assert not self.frames or self.frames[-1] is False,"export is forbidden while applying"
         return self.backend.export()
     def close(self):
         return self.backend.close()
